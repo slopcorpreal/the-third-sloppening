@@ -33,7 +33,7 @@ pub fn run() -> Result<()> {
         let buffer = MmapBuffer::open(&path)
             .with_context(|| format!("failed to open {}", path.display()))?;
         validate_utf8(buffer.as_slice())
-            .unwrap_or("[file unavailable: invalid UTF-8]")
+            .unwrap_or("[error: file contains invalid UTF-8]")
             .to_owned()
     } else {
         "the-third-sloppening\n\nType to edit. Use Backspace/Delete, Arrow Up/Down, Page Up/Down, or mouse wheel to scroll."
@@ -652,6 +652,6 @@ mod tests {
         save_text_to_path(&path, "hello\nworld").expect("save should succeed");
         let saved = std::fs::read_to_string(&path).expect("saved file should be readable");
         assert_eq!(saved, "hello\nworld");
-        let _ = std::fs::remove_file(path);
+        std::fs::remove_file(path).ok();
     }
 }
