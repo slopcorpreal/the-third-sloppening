@@ -20,6 +20,7 @@ cargo run -- path/to/large-file.txt
 
 # controls
 # - Type to edit
-# - Backspace/Delete to remove text
+# - Backspace/Delete, Enter, Tab, Home, End
 # - Arrow Up/Down, PgUp/PgDn, or mouse wheel to scroll the viewport
+# - Left click to place the insertion point
 ```
