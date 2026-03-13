@@ -6,11 +6,12 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0"
 cosmic-text = "0.12"
+glyphon = "0.6"
 memchr = "2.7"
 memmap2 = "0.9"
 mimalloc = { version = "0.1", default-features = false }
 pollster = "0.3"
 rayon = "1.10"
 simdutf8 = "0.1"
-wgpu = "0.19"
+wgpu = "22.1"
 winit = "0.29"
