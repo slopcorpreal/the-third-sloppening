@@ -21,6 +21,9 @@ use crate::core::{
 const FONT_SIZE: f32 = 16.0;
 const LINE_HEIGHT: f32 = 22.0;
 const VIEWPORT_PADDING: f32 = 24.0;
+const TEXT_INSET: f32 = VIEWPORT_PADDING / 2.0;
+// Approximate column hit-testing for proportional fonts until glyph-position mapping is added.
+const CHAR_WIDTH_RATIO: f32 = 0.6;
 const PIXELS_PER_SCROLL_LINE: f64 = 24.0;
 
 pub fn run() -> Result<()> {
@@ -217,15 +220,10 @@ impl EditorState {
         left: f32,
     ) {
         let lines: Vec<&str> = self.text.split('\n').collect();
-        if lines.is_empty() {
-            self.cursor = 0;
-            return;
-        }
-
         let view_line = ((y - top).max(0.0) / line_height).floor() as usize;
         let line_idx = (self.scroll_line + view_line).min(lines.len() - 1);
 
-        let approx_col = ((x - left).max(0.0) / (FONT_SIZE * 0.6)).floor() as usize;
+        let approx_col = ((x - left).max(0.0) / (FONT_SIZE * CHAR_WIDTH_RATIO)).floor() as usize;
         let line = lines[line_idx];
         let col_byte = line
             .char_indices()
@@ -366,7 +364,7 @@ impl<'w> GpuRenderer<'w> {
             viewport,
             atlas,
             text_renderer,
-            pointer: (12.0, 12.0),
+            pointer: (TEXT_INSET, TEXT_INSET),
         };
         renderer.refresh_text();
         renderer.prepare_text()?;
@@ -447,8 +445,8 @@ impl<'w> GpuRenderer<'w> {
             self.pointer.0,
             self.pointer.1,
             LINE_HEIGHT,
-            12.0,
-            12.0,
+            TEXT_INSET,
+            TEXT_INSET,
         );
     }
 
@@ -484,14 +482,14 @@ impl<'w> GpuRenderer<'w> {
                 &self.viewport,
                 [TextArea {
                     buffer: &self.text_buffer,
-                    left: 12.0,
-                    top: 12.0,
+                    left: TEXT_INSET,
+                    top: TEXT_INSET,
                     scale: 1.0,
                     bounds: TextBounds {
-                        left: 12,
-                        top: 12,
-                        right: self.config.width as i32 - 12,
-                        bottom: self.config.height as i32 - 12,
+                        left: TEXT_INSET as i32,
+                        top: TEXT_INSET as i32,
+                        right: self.config.width as i32 - TEXT_INSET as i32,
+                        bottom: self.config.height as i32 - TEXT_INSET as i32,
                     },
                     default_color: Color::rgb(230, 236, 244),
                     custom_glyphs: &[],
