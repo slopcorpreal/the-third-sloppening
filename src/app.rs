@@ -2,19 +2,21 @@ use std::env;
 
 use anyhow::{Context, Result};
 use glyphon::{
-    Attrs, Buffer, Color, FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea, TextAtlas,
-    TextBounds, TextRenderer, Viewport,
+    Attrs, Buffer, Color, FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea,
+    TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use wgpu::SurfaceError;
 use winit::{
     dpi::PhysicalSize,
-    event::{ElementState, Event, Ime, MouseScrollDelta, WindowEvent},
+    event::{ElementState, Event, Ime, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     keyboard::{Key, NamedKey},
     window::WindowBuilder,
 };
 
-use crate::core::{line_index::LineIndex, mmap_buffer::MmapBuffer, piece_tree::PieceTree, utf8::validate_utf8};
+use crate::core::{
+    line_index::LineIndex, mmap_buffer::MmapBuffer, piece_tree::PieceTree, utf8::validate_utf8,
+};
 
 const FONT_SIZE: f32 = 16.0;
 const LINE_HEIGHT: f32 = 22.0;
@@ -29,8 +31,8 @@ pub fn run() -> Result<()> {
 
         let preview_end = tree.len().min(64 * 1024);
         let preview = tree.visible_text(0, preview_end);
-        let text = validate_utf8(&preview)
-            .unwrap_or("[preview unavailable: file contains invalid UTF-8]");
+        let text =
+            validate_utf8(&preview).unwrap_or("[preview unavailable: file contains invalid UTF-8]");
 
         format!(
             "the-third-sloppening\nfile: {path}\nindexed lines: {}\n\n{}",
@@ -62,10 +64,16 @@ pub fn run() -> Result<()> {
                     renderer.insert_text(&text);
                     window.request_redraw();
                 }
-                WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                WindowEvent::KeyboardInput { event, .. }
+                    if event.state == ElementState::Pressed =>
+                {
                     match &event.logical_key {
                         Key::Named(NamedKey::Backspace) => renderer.backspace(),
                         Key::Named(NamedKey::Delete) => renderer.delete_forward(),
+                        Key::Named(NamedKey::Enter) => renderer.insert_text("\n"),
+                        Key::Named(NamedKey::Tab) => renderer.insert_text("\t"),
+                        Key::Named(NamedKey::Home) => renderer.move_to_line_start(),
+                        Key::Named(NamedKey::End) => renderer.move_to_line_end(),
                         Key::Named(NamedKey::ArrowLeft) => renderer.move_left(),
                         Key::Named(NamedKey::ArrowRight) => renderer.move_right(),
                         Key::Named(NamedKey::ArrowUp) => renderer.scroll_lines(-1),
@@ -76,10 +84,23 @@ pub fn run() -> Result<()> {
                     }
                     window.request_redraw();
                 }
+                WindowEvent::CursorMoved { position, .. } => {
+                    renderer.update_pointer(position.x as f32, position.y as f32);
+                }
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    renderer.click_primary();
+                    window.request_redraw();
+                }
                 WindowEvent::MouseWheel { delta, .. } => {
                     let lines = match delta {
                         MouseScrollDelta::LineDelta(_, y) => y.round() as i32,
-                        MouseScrollDelta::PixelDelta(pos) => (pos.y / PIXELS_PER_SCROLL_LINE).round() as i32,
+                        MouseScrollDelta::PixelDelta(pos) => {
+                            (pos.y / PIXELS_PER_SCROLL_LINE).round() as i32
+                        }
                     };
                     renderer.scroll_lines(-lines);
                     window.request_redraw();
@@ -157,6 +178,21 @@ impl EditorState {
         }
     }
 
+    fn move_to_line_start(&mut self) {
+        let line_start = self.text[..self.cursor]
+            .rfind('\n')
+            .map_or(0, |idx| idx + 1);
+        self.cursor = line_start;
+    }
+
+    fn move_to_line_end(&mut self) {
+        let line_end = self.text[self.cursor..]
+            .find('\n')
+            .map(|offset| self.cursor + offset)
+            .unwrap_or(self.text.len());
+        self.cursor = line_end;
+    }
+
     fn scroll_lines(&mut self, delta: i32) {
         let max_scroll = self.total_lines.saturating_sub(1);
         let next = (self.scroll_line as i64 + delta as i64).clamp(0, max_scroll as i64);
@@ -165,11 +201,43 @@ impl EditorState {
 
     fn visible_text(&self, viewport_lines: usize) -> String {
         self.text
-            .lines()
+            .split('\n')
             .skip(self.scroll_line)
             .take(viewport_lines.max(1))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn set_cursor_from_view_position(
+        &mut self,
+        x: f32,
+        y: f32,
+        line_height: f32,
+        top: f32,
+        left: f32,
+    ) {
+        let lines: Vec<&str> = self.text.split('\n').collect();
+        if lines.is_empty() {
+            self.cursor = 0;
+            return;
+        }
+
+        let view_line = ((y - top).max(0.0) / line_height).floor() as usize;
+        let line_idx = (self.scroll_line + view_line).min(lines.len() - 1);
+
+        let approx_col = ((x - left).max(0.0) / (FONT_SIZE * 0.6)).floor() as usize;
+        let line = lines[line_idx];
+        let col_byte = line
+            .char_indices()
+            .nth(approx_col)
+            .map(|(idx, _)| idx)
+            .unwrap_or(line.len());
+
+        let line_start = lines
+            .iter()
+            .take(line_idx)
+            .fold(0usize, |acc, part| acc + part.len() + 1);
+        self.cursor = line_start + col_byte;
     }
 
     fn prev_boundary(&self, from: usize) -> usize {
@@ -193,7 +261,7 @@ impl EditorState {
 }
 
 fn count_lines(text: &str) -> usize {
-    text.lines().count().max(1)
+    text.bytes().filter(|byte| *byte == b'\n').count() + 1
 }
 
 struct GpuRenderer<'w> {
@@ -209,6 +277,7 @@ struct GpuRenderer<'w> {
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
+    pointer: (f32, f32),
 }
 
 impl<'w> GpuRenderer<'w> {
@@ -274,12 +343,8 @@ impl<'w> GpuRenderer<'w> {
         );
 
         let mut atlas = TextAtlas::new(&device, &queue, &cache, config.format);
-        let text_renderer = TextRenderer::new(
-            &mut atlas,
-            &device,
-            wgpu::MultisampleState::default(),
-            None,
-        );
+        let text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
 
         let mut text_buffer = Buffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         text_buffer.set_size(
@@ -301,6 +366,7 @@ impl<'w> GpuRenderer<'w> {
             viewport,
             atlas,
             text_renderer,
+            pointer: (12.0, 12.0),
         };
         renderer.refresh_text();
         renderer.prepare_text()?;
@@ -358,21 +424,48 @@ impl<'w> GpuRenderer<'w> {
         self.editor.move_right();
     }
 
+    fn move_to_line_start(&mut self) {
+        self.editor.move_to_line_start();
+    }
+
+    fn move_to_line_end(&mut self) {
+        self.editor.move_to_line_end();
+    }
+
     fn scroll_lines(&mut self, lines: i32) {
         self.editor.scroll_lines(lines);
         self.refresh_text();
         self.prepare_text_logged();
     }
 
+    fn update_pointer(&mut self, x: f32, y: f32) {
+        self.pointer = (x, y);
+    }
+
+    fn click_primary(&mut self) {
+        self.editor.set_cursor_from_view_position(
+            self.pointer.0,
+            self.pointer.1,
+            LINE_HEIGHT,
+            12.0,
+            12.0,
+        );
+    }
+
     fn refresh_text(&mut self) {
-        let viewport_lines = ((self.config.height as f32 - VIEWPORT_PADDING) / LINE_HEIGHT).max(1.0) as usize;
+        let viewport_lines =
+            ((self.config.height as f32 - VIEWPORT_PADDING) / LINE_HEIGHT).max(1.0) as usize;
         let mut visible = self.editor.visible_text(viewport_lines);
         if visible.is_empty() {
             // Prevent glyphon prep/render issues on empty input by keeping one drawable codepoint.
             visible.push(' ');
         }
-        self.text_buffer
-            .set_text(&mut self.font_system, &visible, Attrs::new(), Shaping::Advanced);
+        self.text_buffer.set_text(
+            &mut self.font_system,
+            &visible,
+            Attrs::new(),
+            Shaping::Advanced,
+        );
     }
 
     fn prepare_text_logged(&mut self) {
@@ -470,7 +563,7 @@ impl<'w> GpuRenderer<'w> {
 
 #[cfg(test)]
 mod tests {
-    use super::EditorState;
+    use super::{EditorState, LINE_HEIGHT};
 
     #[test]
     fn editor_state_edits_and_scrolls() {
@@ -494,5 +587,23 @@ mod tests {
         assert_eq!(state.text, "🌍");
         state.delete_forward();
         assert_eq!(state.text, "");
+    }
+
+    #[test]
+    fn editor_state_preserves_trailing_empty_line_for_viewport() {
+        let mut state = EditorState::new("a\n".to_owned());
+        state.scroll_lines(1);
+        assert_eq!(state.total_lines, 2);
+        assert_eq!(state.visible_text(1), "");
+        state.insert_text("b");
+        assert_eq!(state.text, "a\nb");
+    }
+
+    #[test]
+    fn editor_state_moves_cursor_from_mouse_position() {
+        let mut state = EditorState::new("abc\ndef".to_owned());
+        state.set_cursor_from_view_position(24.0, 35.0, LINE_HEIGHT, 12.0, 12.0);
+        state.insert_text("X");
+        assert_eq!(state.text, "abc\ndXef");
     }
 }
