@@ -202,8 +202,7 @@ mod tests {
 
     #[test]
     fn visible_text_reads_window_only() {
-        let mut tree =
-            PieceTree::from_original(MmapBuffer::from_bytes(b"line1\nline2\nline3".to_vec()));
+        let mut tree = PieceTree::from_original(MmapBuffer::from_bytes(b"line1\nline2\nline3".to_vec()));
         tree.insert(6, b"NEW\n");
 
         assert_eq!(tree.visible_text(6, 10), b"NEW\n");
