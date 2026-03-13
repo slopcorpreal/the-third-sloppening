@@ -1,4 +1,7 @@
-use std::env;
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use glyphon::{
@@ -10,13 +13,11 @@ use winit::{
     dpi::PhysicalSize,
     event::{ElementState, Event, Ime, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
-    keyboard::{Key, NamedKey},
+    keyboard::{Key, ModifiersState, NamedKey},
     window::WindowBuilder,
 };
 
-use crate::core::{
-    line_index::LineIndex, mmap_buffer::MmapBuffer, piece_tree::PieceTree, utf8::validate_utf8,
-};
+use crate::core::{mmap_buffer::MmapBuffer, utf8::validate_utf8};
 
 const FONT_SIZE: f32 = 16.0;
 const LINE_HEIGHT: f32 = 22.0;
@@ -27,21 +28,13 @@ const CHAR_WIDTH_RATIO: f32 = 0.6;
 const PIXELS_PER_SCROLL_LINE: f64 = 24.0;
 
 pub fn run() -> Result<()> {
-    let initial_text = if let Some(path) = env::args().nth(1) {
-        let buffer = MmapBuffer::open(&path).with_context(|| format!("failed to open {path}"))?;
-        let tree = PieceTree::from_original(buffer);
-        let index = LineIndex::build(tree.to_bytes().as_slice(), 8 * 1024 * 1024);
-
-        let preview_end = tree.len().min(64 * 1024);
-        let preview = tree.visible_text(0, preview_end);
-        let text =
-            validate_utf8(&preview).unwrap_or("[preview unavailable: file contains invalid UTF-8]");
-
-        format!(
-            "the-third-sloppening\nfile: {path}\nindexed lines: {}\n\n{}",
-            index.line_count(),
-            text
-        )
+    let file_path = env::args().nth(1).map(PathBuf::from);
+    let initial_text = if let Some(path) = file_path.as_deref() {
+        let buffer = MmapBuffer::open(&path)
+            .with_context(|| format!("failed to open {}", path.display()))?;
+        validate_utf8(buffer.as_slice())
+            .unwrap_or("[file unavailable: invalid UTF-8]")
+            .to_owned()
     } else {
         "the-third-sloppening\n\nType to edit. Use Backspace/Delete, Arrow Up/Down, Page Up/Down, or mouse wheel to scroll."
             .to_owned()
@@ -54,7 +47,7 @@ pub fn run() -> Result<()> {
         .build(&event_loop)
         .context("failed to create window")?;
 
-    let mut renderer = pollster::block_on(GpuRenderer::new(&window, &initial_text))?;
+    let mut renderer = pollster::block_on(GpuRenderer::new(&window, &initial_text, file_path))?;
 
     event_loop.run(|event, target| {
         target.set_control_flow(ControlFlow::Poll);
@@ -67,23 +60,28 @@ pub fn run() -> Result<()> {
                     renderer.insert_text(&text);
                     window.request_redraw();
                 }
+                WindowEvent::ModifiersChanged(modifiers) => {
+                    renderer.set_modifiers(modifiers.state());
+                }
                 WindowEvent::KeyboardInput { event, .. }
                     if event.state == ElementState::Pressed =>
                 {
-                    match &event.logical_key {
-                        Key::Named(NamedKey::Backspace) => renderer.backspace(),
-                        Key::Named(NamedKey::Delete) => renderer.delete_forward(),
-                        Key::Named(NamedKey::Enter) => renderer.insert_text("\n"),
-                        Key::Named(NamedKey::Tab) => renderer.insert_text("\t"),
-                        Key::Named(NamedKey::Home) => renderer.move_to_line_start(),
-                        Key::Named(NamedKey::End) => renderer.move_to_line_end(),
-                        Key::Named(NamedKey::ArrowLeft) => renderer.move_left(),
-                        Key::Named(NamedKey::ArrowRight) => renderer.move_right(),
-                        Key::Named(NamedKey::ArrowUp) => renderer.scroll_lines(-1),
-                        Key::Named(NamedKey::ArrowDown) => renderer.scroll_lines(1),
-                        Key::Named(NamedKey::PageUp) => renderer.scroll_lines(-20),
-                        Key::Named(NamedKey::PageDown) => renderer.scroll_lines(20),
-                        _ => {}
+                    if !renderer.handle_save_shortcut(&event.logical_key) {
+                        match &event.logical_key {
+                            Key::Named(NamedKey::Backspace) => renderer.backspace(),
+                            Key::Named(NamedKey::Delete) => renderer.delete_forward(),
+                            Key::Named(NamedKey::Enter) => renderer.insert_text("\n"),
+                            Key::Named(NamedKey::Tab) => renderer.insert_text("\t"),
+                            Key::Named(NamedKey::Home) => renderer.move_to_line_start(),
+                            Key::Named(NamedKey::End) => renderer.move_to_line_end(),
+                            Key::Named(NamedKey::ArrowLeft) => renderer.move_left(),
+                            Key::Named(NamedKey::ArrowRight) => renderer.move_right(),
+                            Key::Named(NamedKey::ArrowUp) => renderer.scroll_lines(-1),
+                            Key::Named(NamedKey::ArrowDown) => renderer.scroll_lines(1),
+                            Key::Named(NamedKey::PageUp) => renderer.scroll_lines(-20),
+                            Key::Named(NamedKey::PageDown) => renderer.scroll_lines(20),
+                            _ => {}
+                        }
                     }
                     window.request_redraw();
                 }
@@ -262,6 +260,10 @@ fn count_lines(text: &str) -> usize {
     text.bytes().filter(|byte| *byte == b'\n').count() + 1
 }
 
+fn save_text_to_path(path: &Path, text: &str) -> Result<()> {
+    std::fs::write(path, text).with_context(|| format!("failed to save {}", path.display()))
+}
+
 struct GpuRenderer<'w> {
     surface: wgpu::Surface<'w>,
     device: wgpu::Device,
@@ -276,10 +278,16 @@ struct GpuRenderer<'w> {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     pointer: (f32, f32),
+    file_path: Option<PathBuf>,
+    modifiers: ModifiersState,
 }
 
 impl<'w> GpuRenderer<'w> {
-    async fn new(window: &'w winit::window::Window, initial_text: &str) -> Result<Self> {
+    async fn new(
+        window: &'w winit::window::Window,
+        initial_text: &str,
+        file_path: Option<PathBuf>,
+    ) -> Result<Self> {
         let size = window.inner_size();
 
         let instance = wgpu::Instance::default();
@@ -365,6 +373,8 @@ impl<'w> GpuRenderer<'w> {
             atlas,
             text_renderer,
             pointer: (TEXT_INSET, TEXT_INSET),
+            file_path,
+            modifiers: ModifiersState::empty(),
         };
         renderer.refresh_text();
         renderer.prepare_text()?;
@@ -448,6 +458,28 @@ impl<'w> GpuRenderer<'w> {
             TEXT_INSET,
             TEXT_INSET,
         );
+    }
+
+    fn set_modifiers(&mut self, modifiers: ModifiersState) {
+        self.modifiers = modifiers;
+    }
+
+    fn handle_save_shortcut(&mut self, logical_key: &Key) -> bool {
+        let control_or_super = self.modifiers.control_key() || self.modifiers.super_key();
+        if !control_or_super {
+            return false;
+        }
+        match logical_key {
+            Key::Character(ch) if ch.eq_ignore_ascii_case("s") => {
+                if let Some(path) = self.file_path.as_deref() {
+                    if let Err(error) = save_text_to_path(path, &self.editor.text) {
+                        eprintln!("{error:#}");
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     fn refresh_text(&mut self) {
@@ -561,7 +593,9 @@ impl<'w> GpuRenderer<'w> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EditorState, LINE_HEIGHT};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::{EditorState, LINE_HEIGHT, save_text_to_path};
 
     #[test]
     fn editor_state_edits_and_scrolls() {
@@ -603,5 +637,21 @@ mod tests {
         state.set_cursor_from_view_position(24.0, 35.0, LINE_HEIGHT, 12.0, 12.0);
         state.insert_text("X");
         assert_eq!(state.text, "abc\ndXef");
+    }
+
+    #[test]
+    fn save_text_to_path_writes_expected_contents() {
+        let path = std::env::temp_dir().join(format!(
+            "the-third-sloppening-save-{}-{}.txt",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be after unix epoch")
+                .as_nanos()
+        ));
+        save_text_to_path(&path, "hello\nworld").expect("save should succeed");
+        let saved = std::fs::read_to_string(&path).expect("saved file should be readable");
+        assert_eq!(saved, "hello\nworld");
+        let _ = std::fs::remove_file(path);
     }
 }

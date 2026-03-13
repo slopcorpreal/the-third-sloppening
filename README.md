@@ -23,4 +23,5 @@ cargo run -- path/to/large-file.txt
 # - Backspace/Delete, Enter, Tab, Home, End
 # - Arrow Up/Down, PgUp/PgDn, or mouse wheel to scroll the viewport
 # - Left click to place the insertion point
+# - Ctrl+S (or Cmd+S) saves when opened with a file path
 ```
