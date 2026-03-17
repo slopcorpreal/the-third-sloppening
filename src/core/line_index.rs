@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use memchr::memchr_iter;
 use rayon::prelude::*;
 

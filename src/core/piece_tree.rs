@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::ops::Range;
 
 use super::mmap_buffer::MmapBuffer;

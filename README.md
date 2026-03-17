@@ -7,8 +7,7 @@ Native Rust prototype for a high-performance Windows-focused text editor.
 - Native desktop editor window path with `winit` + `wgpu` (no webview)
 - `mimalloc` global allocator
 - `memmap2`-backed immutable source buffer
-- Piece-table style mutable text model (`original` + append-only `add` buffer)
-- Parallel line index builder using `rayon` + SIMD-optimized `memchr`
+- Core piece-table and parallel line-index prototypes (tested modules, not yet wired into the live editor state)
 - SIMD UTF-8 validation via `simdutf8`
 - `glyphon`/`cosmic-text` viewport text rendering with keyboard typing, deletion, and scrolling
 
